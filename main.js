@@ -4,8 +4,8 @@ const path = require('path');
 // --- Configuration & Constants ---
 const CONFIG_PATH = path.join(__dirname, 'config.ini');
 
-let config = {};
-let global_info = {
+const config = {};
+const global_info = {
     token: '',
     uuid: '',
     location: 'J',
@@ -15,11 +15,19 @@ let global_info = {
     department: '',
 };
 
+const dailyTargets = {
+    dateStr: '',
+    checkInTime: null,
+    checkOutTime: null,
+    alreadyCheckedIn: false,
+    alreadyCheckedOut: false
+};
+
 // --- Logger Utility ---
 const Logger = {
-    info: (msg) => console.log(`[${new Date().toISOString()}] [INFO] ${msg}`),
-    error: (msg, err) => console.error(`[${new Date().toISOString()}] [ERROR] ${msg}`, err || ''),
-    warn: (msg) => console.warn(`[${new Date().toISOString()}] [WARN] ${msg}`)
+    info: (msg) => console.log(`[${new Date().toLocaleTimeString()}] [INFO] ${msg}`),
+    error: (msg, err) => console.error(`[${new Date().toLocaleTimeString()}] [ERROR] ${msg}`, err || ''),
+    warn: (msg) => console.warn(`[${new Date().toLocaleTimeString()}] [WARN] ${msg}`)
 };
 
 // --- Helper Functions ---
@@ -41,13 +49,16 @@ function loadConfig() {
                 parsed[key] = value;
             }
         });
-        config = parsed;
-        // Logger.info('Configuration loaded successfully.'); // Reduce noise
+        Object.assign(config, parsed);
         return true;
     } catch (error) {
         Logger.error('Failed to load configuration', error);
         return false;
     }
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function generalRequest(url, params, token = '', method = 'POST', retryCount = 3) {
@@ -91,7 +102,7 @@ async function generalRequest(url, params, token = '', method = 'POST', retryCou
             attempt++;
             Logger.warn(`Request failed (Attempt ${attempt}/${retryCount}): ${url} - ${error.message}`);
             if (attempt >= retryCount) throw error;
-            await new Promise(r => setTimeout(r, 2000 * attempt));
+            await sleep(2000 * attempt);
         }
     }
 }
@@ -110,7 +121,7 @@ async function login() {
     try {
         const data = await generalRequest(url_login, params);
         if (data && data.myinfo) {
-            global_info = data.myinfo;
+            Object.assign(global_info, data.myinfo);
             Logger.info(`Login successful. Welcome, ${global_info.last_name}`);
             return true;
         } else {
@@ -130,7 +141,7 @@ async function getAttendance() {
         const data = await generalRequest(url_getattendance, { displayLoading: true }, global_info.token, 'GET', 1);
         return data?.sendpacket || {};
     } catch (error) {
-        Logger.error('Failed to get attendance');
+        Logger.warn('Failed to get attendance');
         return null;
     }
 }
@@ -185,14 +196,6 @@ function hasActionRecord(attendanceData, type) {
 
 // --- Scheduler Logic ---
 
-let dailyTargets = {
-    dateStr: '',
-    checkInTime: null,
-    checkOutTime: null,
-    alreadyCheckedIn: false,
-    alreadyCheckedOut: false
-};
-
 function parseTime(timeStr) {
     const [h, m, s] = timeStr.split(':').map(Number);
     const now = new Date();
@@ -222,13 +225,13 @@ function getTodayTargets() {
         const checkInTarget = new Date(checkInBase.getTime() + getRandomDelay(parseInt(config.checkin_random_range_minutes || 0)));
         const checkOutTarget = new Date(checkOutBase.getTime() + getRandomDelay(parseInt(config.checkout_random_range_minutes || 0)));
 
-        dailyTargets = {
+        Object.assign(dailyTargets, {
             dateStr: dateStr,
             checkInTime: checkInTarget,
             checkOutTime: checkOutTarget,
             alreadyCheckedIn: false,
             alreadyCheckedOut: false
-        };
+        });
         Logger.info(`Generated new targets for ${dateStr}: In @ ${checkInTarget.toLocaleTimeString()}, Out @ ${checkOutTarget.toLocaleTimeString()}`);
     }
     return dailyTargets;
@@ -249,7 +252,7 @@ async function executeTask(taskType) {
         return; // Stop execution for this cycle
     }
 
-    Logger.info(`Executing executeTask ${taskType}. attendance: ${JSON.stringify(attendance)}`);
+    Logger.info(`Executing executeTask "${taskType}". attendance data: ${JSON.stringify(attendance)}`);
 
     if (taskType === 'checkin') {
         if (hasActionRecord(attendance, 'starttime')) {
@@ -269,51 +272,59 @@ async function executeTask(taskType) {
 }
 
 async function startHeartbeat() {
-    let nextGap = 1;
-    try {
-        // Reload config every heartbeat to allow dynamic updates
-        if (!loadConfig()) {
-            Logger.error('Config load failed, retrying next heartbeat.');
-            return;
+    while (true) {
+        let nextGap = 1;
+        try {
+            if (!isWorkDay()) {
+                nextGap = 60; // 1 hour
+                Logger.info('Heartbeat: Today is not a workday. Relaxing.');
+            } else {
+                const targets = getTodayTargets();
+                const now = new Date();
+                // Check In Logic
+                if (!targets.alreadyCheckedIn && now >= targets.checkInTime) {
+                    await executeTask('checkin');
+                } else if (!targets.alreadyCheckedOut && now >= targets.checkOutTime) {
+                    await executeTask('checkout');
+                } else if (targets.alreadyCheckedOut) {
+                    nextGap = 30;
+                    Logger.info('Already checked out today. Skipping And relaxing.');
+                } else {
+                    Logger.info(`Heartbeat: Next Targets -> In: ${targets.checkInTime.toLocaleTimeString()}, Out: ${targets.checkOutTime.toLocaleTimeString()}`);
+                }
+            }
+        } catch (err) {
+            Logger.error('Unexpected error in heartbeat loop', err);
+        } finally {
+            // 等待下次執行
+            const avoidSameSecond = Math.round(Math.random() * 3);
+            const waitTime = (Math.round(nextGap * 60) + avoidSameSecond) * 1000;
+            await sleep(waitTime);
         }
-
-        if (!isWorkDay()) {
-            nextGap = 60; // 1 hour
-            Logger.info('Heartbeat: Today is not a workday. Relaxing.');
-            return;
-        }
-
-        const targets = getTodayTargets();
-        const now = new Date();
-
-        // Check In Logic
-        // If current time is past the target check-in time, ensure we are checked in.
-        if (!targets.alreadyCheckedIn && now >= targets.checkInTime) {
-            await executeTask('checkin');
-        } else if (!targets.alreadyCheckedOut && now >= targets.checkOutTime) {
-            await executeTask('checkout');
-        } else if (targets.alreadyCheckedOut) {
-            nextGap = 60;
-            Logger.info('Already checked out today. Skipping.');
-        } else {
-            Logger.info(`Heartbeat: Next Targets -> In: ${targets.checkInTime.toLocaleTimeString()}, Out: ${targets.checkOutTime.toLocaleTimeString()}`);
-        }
-
-    } catch (err) {
-        Logger.error('Unexpected error in heartbeat loop', err);
-    } finally {
-        const advoidSameSecond = Math.round(Math.random() * 3);
-        setTimeout(startHeartbeat, (Math.round(nextGap * 60) + advoidSameSecond) * 1000);
     }
 }
 
 // --- Entry Point ---
+async function main() {
+    // 優雅關閉處理
+    const gracefulShutdown = () => {
+        Logger.info('Stopping agent...');
+        process.exit(0);
+    };
+    process.on('SIGINT', gracefulShutdown);
+    process.on('SIGTERM', gracefulShutdown);
+    Logger.info('Starting HR Attendance Automation Agent (Heartbeat Mode)...');
 
-Logger.info('Starting HR Attendance Automation Agent (Heartbeat Mode)...');
-startHeartbeat();
+    if (!loadConfig()) {
+        Logger.error('Config load failed, retrying next heartbeat.');
+        return;
+    }
+    // 啟動心跳
+    await startHeartbeat();
+}
 
-// Handle graceful shutdown for PM2
-process.on('SIGINT', () => {
-    Logger.info('Stopping agent...');
-    process.exit(0);
+// 啟動主程序
+main().catch(err => {
+    Logger.error('Failed to start application', err);
+    process.exit(1);
 });
