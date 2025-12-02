@@ -290,7 +290,8 @@ async function startHeartbeat() {
                     nextGap = 30;
                     Logger.info('Already checked out today. Skipping And relaxing.');
                 } else {
-                    Logger.info(`Heartbeat: Next Targets -> In: ${targets.checkInTime.toLocaleTimeString()}, Out: ${targets.checkOutTime.toLocaleTimeString()}`);
+                    const nextTarget = targets.alreadyCheckedIn ? `Out: ${targets.checkOutTime.toLocaleTimeString()}` : `In: ${targets.checkInTime.toLocaleTimeString()}`;
+                    Logger.info(`Heartbeat: Next Target -> ${nextTarget}`);
                 }
             }
         } catch (err) {
@@ -306,6 +307,7 @@ async function startHeartbeat() {
 
 // --- Entry Point ---
 async function main() {
+    const args = process.argv.slice(2);
     // 優雅關閉處理
     const gracefulShutdown = () => {
         Logger.info('Stopping agent...');
@@ -319,8 +321,14 @@ async function main() {
         Logger.error('Config load failed, retrying next heartbeat.');
         return;
     }
-    // 啟動心跳
-    await startHeartbeat();
+    if (args.includes('--checkin')) {
+        await executeTask('checkin');
+    } else if (args.includes('--checkout')) {
+        await executeTask('checkout');
+    } else {
+        // 啟動心跳
+        await startHeartbeat();
+    }
 }
 
 // 啟動主程序

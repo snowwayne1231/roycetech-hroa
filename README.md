@@ -14,5 +14,11 @@ vi config.ini
 # checkout_random_range_minutes 下班隨機增加分鐘
 # workday_week 會執行的星期
 
+# pm2 啟動永駐監測
 pm2 start ecosystem.config.js
+
+# 登入並打卡上班 (系統排程用)
+node main.js --checkin
+# 登入並打卡上班 (系統排程用)
+node main.js --checkin
 ```
